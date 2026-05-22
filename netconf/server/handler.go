@@ -56,13 +56,10 @@ func capabilitesXML() string {
 
 	sessionID += 1 // handle session id out of bounds
 	serverHello.SessionID = sessionID
-	serverHello.Capabilities = append(serverHello.Capabilities, CapNetconf10)
-	serverHello.Capabilities = append(serverHello.Capabilities, CapNetconf11)
-
-	serverHello.Capabilities = append(serverHello.Capabilities, CapWritableRunning)
-	serverHello.Capabilities = append(serverHello.Capabilities, CapXPath)
-	serverHello.Capabilities = append(serverHello.Capabilities, CapMonitoring)
-	serverHello.Capabilities = append(serverHello.Capabilities, CapStartup)
+	// Advertise only the capabilities whose operations are implemented.
+	// See advertisedBaseCapabilities for the rationale (notably why
+	// :startup and :candidate are intentionally omitted).
+	serverHello.Capabilities = append(serverHello.Capabilities, advertisedBaseCapabilities()...)
 
 	if !read {
 		readYangModules()

@@ -14,24 +14,42 @@ const (
 	ChunkedMessage = "\n#%d\n%s\n##\n"
 
 	NsNetconfMonitoring = "urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring"
-	NsTailfActions      = "http://tail-f.com/ns/netconf/actions/1.0"
 
+	// NETCONF capability URNs advertised in the <hello>; see
+	// advertisedBaseCapabilities for the policy on which ones are listed.
 	CapNetconf10       = "urn:ietf:params:netconf:base:1.0"
 	CapNetconf11       = "urn:ietf:params:netconf:base:1.1"
-	CapConfirmedCommit = "urn:ietf:params:netconf:capability:confirmed-commit:1.1"
-	CapValidate        = "urn:ietf:params:netconf:capability:validate:1.1"
-	CapWithDefaults    = "urn:ietf:params:netconf:capability:with-defaults:1.0"
-	CapNotifiction     = "urn:ietf:params:netconf:capability:notification:1.0"
-	CapInterleave      = "urn:ietf:params:netconf:capability:interleave:1.0"
-	CapStartup         = "urn:ietf:params:netconf:capability:startup:1.0"
 	CapWritableRunning = "urn:ietf:params:netconf:capability:writable-running:1.0"
-	CapCandidate       = "urn:ietf:params:netconf:capability:candidate:1.0"
-	CapRollbackOnError = "urn:ietf:params:netconf:capability:rollback-on-error:1.0"
-	CapURL             = "urn:ietf:params:netconf:capability:url:1.0"
 	CapXPath           = "urn:ietf:params:netconf:capability:xpath:1.0"
 	CapMonitoring      = NsNetconfMonitoring
-	CapTailfActions    = NsTailfActions
 )
+
+// advertisedBaseCapabilities returns the fixed NETCONF capability URNs sent in
+// the server <hello>, independent of the dynamically discovered YANG modules
+// and the yang-library capability.
+//
+// Only capabilities whose operations this server actually implements are
+// returned (RFC 6241 §8):
+//   - base:1.0 / base:1.1      protocol base
+//   - :writable-running:1.0    <edit-config> writes the running datastore directly
+//   - :xpath:1.0               XPath select filters in <get>/<get-config>
+//   - ietf-netconf-monitoring  <get-schema>
+//
+// Capabilities for operations this server does NOT implement are deliberately
+// excluded so the <hello> never advertises something it cannot honor:
+// :candidate, :validate, :confirmed-commit, :with-defaults, :notification,
+// :interleave, :rollback-on-error and :url. :startup is also excluded — the
+// SONiC-specific <commit> persists the running config with sonic-cfggen, which
+// is not the RFC 6241 §8.7 startup datastore / <copy-config> mechanism.
+func advertisedBaseCapabilities() []string {
+	return []string{
+		CapNetconf10,
+		CapNetconf11,
+		CapWritableRunning,
+		CapXPath,
+		CapMonitoring,
+	}
+}
 
 type RPCError struct {
 	XMLName       xml.Name `xml:"rpc-error"`
