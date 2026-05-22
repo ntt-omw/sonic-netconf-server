@@ -250,7 +250,7 @@ func getNamespace(prefix string) string {
 
 func postChecks(rootNode *xmlquery.Node, jsonConv mxj.Map) mxj.Map {
 
-	filterNode := xmlquery.FindOne(rootNode, "//filter")
+	filterNode := xmlquery.FindOne(rootNode, "//*[local-name()='filter']")
 	containers := xmlquery.Find(filterNode, "./*")
 
 	for _, modelContainer := range containers {
