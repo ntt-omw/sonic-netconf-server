@@ -197,6 +197,19 @@ func ParseEditRequest(node *xmlquery.Node) ([]Config, error) {
 
 	var configs []Config
 
+	// Dispatch per top-level container: SONiC YANG uses the legacy 3-level extractors
+	// (which depend on netconf_codegen.SonicMap key tables), OpenConfig and other
+	// non-SONiC modules use the generic recursive parser that resolves the module
+	// prefix from the XML namespace.
+	configNode := xmlquery.FindOne(node, "//*[local-name() = 'config']")
+	if configNode != nil {
+		for _, modelContainer := range xmlquery.Find(configNode, "./*") {
+			if !isSonicContainer(modelContainer) {
+				configs = append(configs, parseEditConfigOC(modelContainer)...)
+			}
+		}
+	}
+
 	deleteRequest, err := extractAtomicRequestsByOpTag2(node, "delete")
 	if err == nil {
 		configs = append(configs, deleteRequest...)
@@ -222,9 +235,187 @@ func ParseEditRequest(node *xmlquery.Node) ([]Config, error) {
 		configs = append(configs, createRequest...)
 	}
 
-	glog.Infof("configs", configs)
+	glog.Infof("configs %+v", configs)
 
 	return configs, nil
+}
+
+// isSonicContainer reports whether the model container at the top of an edit-config
+// payload targets a SONiC-YANG module. The decision controls dispatch in
+// ParseEditRequest: SONiC containers fall through to the legacy 3-level extractors
+// that consult netconf_codegen.SonicMap; everything else (OpenConfig, IETF YANG)
+// goes through parseEditConfigOC.
+func isSonicContainer(node *xmlquery.Node) bool {
+	if strings.HasPrefix(node.Prefix, "sonic-") {
+		return true
+	}
+	if node.Prefix == "" && strings.HasPrefix(node.Data, "sonic-") {
+		return true
+	}
+	if ns := containerNamespace(node); ns != "" && strings.Contains(ns, "sonic") {
+		return true
+	}
+	return false
+}
+
+// containerNamespace returns the XML namespace URI in effect for the given node,
+// considering both an explicit `xmlns:<prefix>="..."` declaration and the inherited
+// default `xmlns="..."`. It walks up the parent chain so containers nested under
+// `<config>` still resolve to the namespace declared on the model container.
+func containerNamespace(node *xmlquery.Node) string {
+	target := node.Prefix
+	for n := node; n != nil; n = n.Parent {
+		for _, a := range n.Attr {
+			if target == "" {
+				if a.Name.Local == "xmlns" && (a.Name.Space == "" || a.Name.Space == "xmlns") {
+					return a.Value
+				}
+			} else {
+				if a.Name.Space == "xmlns" && a.Name.Local == target {
+					return a.Value
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// resolveModulePrefix maps a node to its YANG module name. When the node carries
+// an XML namespace prefix (e.g. `oc-if`), the prefix is honored verbatim; otherwise
+// the inherited default namespace is looked up against YangModules.
+func resolveModulePrefix(node *xmlquery.Node) string {
+	if node.Prefix != "" {
+		// Prefer the registered YANG module whose namespace matches the prefix
+		// declaration; fall back to the prefix literal so user-provided shorthand
+		// like `oc-if:interfaces` still produces a workable path.
+		if ns := containerNamespace(node); ns != "" {
+			if mod := yangModuleByNamespace(ns); mod != "" {
+				return mod
+			}
+		}
+		return node.Prefix
+	}
+	if ns := containerNamespace(node); ns != "" {
+		return yangModuleByNamespace(ns)
+	}
+	return ""
+}
+
+func yangModuleByNamespace(ns string) string {
+	for _, m := range YangModules.Modules {
+		if m.Namespace != nil && *m.Namespace == ns && m.Name != nil {
+			return *m.Name
+		}
+	}
+	return ""
+}
+
+// parseEditConfigOC emits Config entries for a non-SONiC top-level container in an
+// edit-config payload. The whole subtree is encoded as a single translib Set call:
+//
+//   - path      = "/{module}:{container}"
+//   - operation = nc:operation attribute on the container (default "merge", RFC 6241)
+//   - payload   = the BODY of the container — i.e. the JSON representation of its
+//                 children, NOT wrapped under "{module}:{container}" again.
+//
+// translib walks the path to land at the target container, and then unmarshals
+// the payload into that container's body. Wrapping the payload under the same
+// "{module}:{container}" key produces translib errors of the form
+// "JSON contains unexpected field {module}:{container}". An earlier version of
+// this dispatcher and the legacy SONiC-YANG extractors emitted the wrapped
+// form; live testing on a 2B'+ed25519 build (test/it/result/SUMMARY.md) showed
+// both reject this shape.
+//
+// Per-leaf operations are not split out; clients that need fine-grained edits
+// should send separate edit-config RPCs.
+func parseEditConfigOC(modelContainer *xmlquery.Node) []Config {
+	modulePrefix := resolveModulePrefix(modelContainer)
+	if modulePrefix == "" {
+		modulePrefix = modelContainer.Data
+	}
+
+	op := getOperation(modelContainer, "merge")
+	payloadValue := buildEditPayload(modelContainer)
+
+	// Config.payload is typed map[string]interface{}; buildEditPayload returns
+	// a map for the common (containment) case. For a degenerate empty container
+	// the helper returns the empty string from getInnerText(nil) — keep the
+	// typed field happy with an empty map in that case.
+	payload, ok := payloadValue.(map[string]interface{})
+	if !ok {
+		payload = map[string]interface{}{}
+	}
+
+	return []Config{{
+		path:      "/" + modulePrefix + ":" + modelContainer.Data,
+		operation: op,
+		payload:   payload,
+	}}
+}
+
+// buildEditPayload recursively converts an XML subtree into a JSON-shaped value.
+// Children with identical tag names — and children that "look like" a YANG list
+// entry — are emitted as JSON arrays per RFC 7951 §4.2.4. Leaves return their
+// text value with the same scalar-conversion rules used by the legacy SONiC
+// extractors (uint -> bool -> string fallback).
+func buildEditPayload(node *xmlquery.Node) interface{} {
+	children := xmlquery.Find(node, "./*")
+	if len(children) == 0 {
+		return getInnerText(xmlquery.FindOne(node, "text()"))
+	}
+
+	grouped := map[string][]*xmlquery.Node{}
+	order := []string{}
+	for _, c := range children {
+		if _, seen := grouped[c.Data]; !seen {
+			order = append(order, c.Data)
+		}
+		grouped[c.Data] = append(grouped[c.Data], c)
+	}
+
+	result := make(map[string]interface{})
+	for _, name := range order {
+		nodes := grouped[name]
+		if len(nodes) > 1 || looksLikeListEntry(nodes[0]) {
+			arr := make([]interface{}, 0, len(nodes))
+			for _, n := range nodes {
+				arr = append(arr, buildEditPayload(n))
+			}
+			result[name] = arr
+			continue
+		}
+		result[name] = buildEditPayload(nodes[0])
+	}
+	return result
+}
+
+// looksLikeListEntry returns true for an XML element that the YANG schema is
+// (very likely) treating as a list entry. The heuristic identifies the
+// canonical OpenConfig / IETF shape: a list entry typically has BOTH a
+// content-match child (the key leaf, e.g. <name>Ethernet0</name>) AND at least
+// one nested container child (e.g. <config>...</config>). Pure container nodes
+// (`<config>`, `<state>`, etc.) only have content-match leaf children with no
+// further containment, and so are NOT mistaken for list entries.
+//
+// translib's RFC 7951 unmarshaller requires every YANG list value to be a JSON
+// array even when only one entry is present. Without this wrapping it rejects
+// the payload with
+//
+//	unmarshalList for schema X: jsonList ... (map): got type map[string]interface{},
+//	expect []interface{}
+//
+// observed during live IT against a 2B'+ed25519+unwrap build.
+func looksLikeListEntry(node *xmlquery.Node) bool {
+	hasContentMatch := false
+	hasContainerChild := false
+	for _, c := range xmlquery.Find(node, "./*") {
+		if isContentMatchNode(c) {
+			hasContentMatch = true
+		} else if isContainmentNode(c) {
+			hasContainerChild = true
+		}
+	}
+	return hasContentMatch && hasContainerChild
 }
 
 func ParseRPCRequest(node *xmlquery.Node) ([]RPCRequest, error) {
@@ -267,6 +458,10 @@ func extractTransactionalRequestByOpTag2(node *xmlquery.Node, opTag string) ([]C
 
 	for _, modelContainer := range containers {
 
+		if !isSonicContainer(modelContainer) {
+			continue
+		}
+
 		var config Config
 		config.operation = opTag
 		config.payload = make(map[string]interface{})
@@ -275,7 +470,7 @@ func extractTransactionalRequestByOpTag2(node *xmlquery.Node, opTag string) ([]C
 
 		// Handle inner container
 		for _, innerContainer := range xmlquery.Find(modelContainer, "./*") {
-	
+
 			// Handle outer container
 			innerContainerPayload := make(map[string][]interface{})
 
@@ -286,7 +481,7 @@ func extractTransactionalRequestByOpTag2(node *xmlquery.Node, opTag string) ([]C
 
 				listOp := getOperation(list, "merge")
 
-				
+
 				listPath := config.path + "/" + innerContainer.Data + "/" + list.Data
 				var leafListSet map[string]bool
 				if strings.Contains(listPath, "sonic") {
@@ -321,7 +516,7 @@ func extractTransactionalRequestByOpTag2(node *xmlquery.Node, opTag string) ([]C
 						leafText, _ = strconv.Unquote(str)
 					}
 
-					
+
 					if leafListSet[leafTag] {
 						if existing, exists := listItemData[leafTag]; exists {
 							listItemData[leafTag] = append(existing.([]interface{}), leafText)
@@ -358,6 +553,10 @@ func extractTransactionalRequestByOpTag3(node *xmlquery.Node, opTag string) ([]C
 	containers := xmlquery.Find(node, "//*[local-name() = 'config']/*")
 
 	for _, modelContainer := range containers {
+
+		if !isSonicContainer(modelContainer) {
+			continue
+		}
 
 		var config Config
 		config.operation = opTag
@@ -451,6 +650,10 @@ func extractAtomicRequestsByOpTag2(node *xmlquery.Node, opTag string) ([]Config,
 	var configs []Config
 
 	for _, modelContainer := range containers {
+
+		if !isSonicContainer(modelContainer) {
+			continue
+		}
 
 		// Handle outer container
 		basePath := "/" + modelContainer.Data + ":" + modelContainer.Data //translib path building
