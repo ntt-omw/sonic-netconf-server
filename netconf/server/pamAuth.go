@@ -55,6 +55,21 @@ func PAMAuthenAndAuthorSSH(username string, passwd string) bool {
 			ssh.Password(passwd),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		// Modern OpenSSH (>= 8.8, 2021) disables the SHA-1 ssh-rsa host key
+		// algorithm by default. A host that presents only an RSA host key
+		// offers it exclusively as rsa-sha2-256/512 (RFC 8332). List those
+		// (plus ed25519/ecdsa) explicitly so this PAM-oracle dial to the
+		// local sshd negotiates a common host key algorithm instead of
+		// failing key exchange. ssh-rsa is kept last for legacy hosts.
+		HostKeyAlgorithms: []string{
+			ssh.KeyAlgoED25519,
+			ssh.KeyAlgoRSASHA256,
+			ssh.KeyAlgoRSASHA512,
+			ssh.KeyAlgoECDSA256,
+			ssh.KeyAlgoECDSA384,
+			ssh.KeyAlgoECDSA521,
+			ssh.KeyAlgoRSA,
+		},
 	}
 	_, err := ssh.Dial("tcp", "127.0.0.1:22", config)
 	if err != nil {

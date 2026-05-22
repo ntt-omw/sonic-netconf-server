@@ -8,7 +8,7 @@ require (
 	github.com/go-redis/redis/v7 v7.0.0-beta.3.0.20190824101152-d19aba07b476
 	github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b
 	github.com/google/uuid v1.3.0
-	golang.org/x/crypto v0.0.0-20210921155107-089bfa567519
+	golang.org/x/crypto v0.0.0-20220315160706-3147a52a75dd
 )
 
 require (
@@ -31,7 +31,7 @@ require (
 	github.com/stretchr/testify v1.8.0 // indirect
 	go4.org/intern v0.0.0-20211027215823-ae77deb06f29 // indirect
 	go4.org/unsafe/assume-no-moving-gc v0.0.0-20230525183740-e7c30c78aeb2 // indirect
-	golang.org/x/net v0.0.0-20210428140749-89ef3d95e781 // indirect
+	golang.org/x/net v0.0.0-20211112202133-69e39bad7dc2 // indirect
 	golang.org/x/sys v0.0.0-20211216021012-1d35b9e2eb4e // indirect
 	golang.org/x/text v0.3.6 // indirect
 	google.golang.org/genproto v0.0.0-20200319113533-08878b785e9c // indirect
