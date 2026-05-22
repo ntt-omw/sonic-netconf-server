@@ -1,9 +1,11 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -24,12 +26,14 @@ import (
 
 // Command line parameters
 var (
-	port             int    // Server port
-	clientAuth       string // Client auth mode
-	redisClient      *redis.Client
-	tacplusConfigKey = "TACACS|NETCONF"
-	publicKeyPath    = "/etc/sonic/netconf-key.pub"
-	privateKeyPath   = "/etc/sonic/netconf-key"
+	port                  int    // Server port
+	clientAuth            string // Client auth mode
+	redisClient           *redis.Client
+	tacplusConfigKey      = "TACACS|NETCONF"
+	publicKeyPath         = "/etc/sonic/netconf-key.pub"
+	privateKeyPath        = "/etc/sonic/netconf-key"
+	ed25519PublicKeyPath  = "/etc/sonic/netconf-key-ed25519.pub"
+	ed25519PrivateKeyPath = "/etc/sonic/netconf-key-ed25519"
 )
 
 func init() {
@@ -51,12 +55,14 @@ func init() {
 func main() {
 
 	MakeSSHKeyPair(publicKeyPath, privateKeyPath)
+	MakeEd25519KeyPair(ed25519PublicKeyPath, ed25519PrivateKeyPath)
 
 	srv := &gliderssh.Server{Addr: ":" + strconv.Itoa(port), Handler: server.DefaultHandler}
 
 	srv.SubsystemHandlers = map[string]gliderssh.SubsystemHandler{}
 
 	srv.SetOption(gliderssh.HostKeyFile(privateKeyPath))
+	srv.SetOption(gliderssh.HostKeyFile(ed25519PrivateKeyPath))
 	srv.SetOption(gliderssh.NoPty())
 	srv.SetOption(gliderssh.PasswordAuth(authenticate))
 
@@ -115,6 +121,119 @@ func MakeSSHKeyPair(pubKeyPath, privateKeyPath string) error {
 	}
 
 	return ioutil.WriteFile(pubKeyPath, cryptossh.MarshalAuthorizedKey(pub), 0655)
+}
+
+// MakeEd25519KeyPair generates an ssh-ed25519 host key pair in OpenSSH format
+// when no key file is present. Existing RSA host keys (managed by MakeSSHKeyPair)
+// are left untouched so this is purely an additive capability — both algorithms
+// are advertised by the SSH server simultaneously.
+//
+// Modern SSH clients (OpenSSH ≥ 8.8 from 2021) reject the ssh-rsa SHA-1 host key
+// algorithm by default and need operators to set HostKeyAlgorithms=+ssh-rsa
+// manually. By offering an ed25519 host key the server stops requiring that
+// workaround.
+func MakeEd25519KeyPair(pubKeyPath, privateKeyPath string) error {
+
+	if fileExists(pubKeyPath) && fileExists(privateKeyPath) {
+		glog.Info("ed25519 host key generation skipped, files exists")
+		return nil
+	}
+
+	glog.Info("ed25519 host key not found, generating server key")
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return err
+	}
+
+	pemBytes, err := marshalOpenSSHEd25519PrivateKey(priv)
+	if err != nil {
+		return err
+	}
+	if err := ioutil.WriteFile(privateKeyPath, pemBytes, 0600); err != nil {
+		return err
+	}
+
+	sshPub, err := cryptossh.NewPublicKey(pub)
+	if err != nil {
+		return err
+	}
+	return ioutil.WriteFile(pubKeyPath, cryptossh.MarshalAuthorizedKey(sshPub), 0644)
+}
+
+// marshalOpenSSHEd25519PrivateKey encodes an ed25519 private key as an
+// unencrypted OpenSSH private key (PEM type "OPENSSH PRIVATE KEY"). The output
+// matches what `ssh-keygen -t ed25519 -N ""` produces and is the format
+// golang.org/x/crypto/ssh.ParsePrivateKey recognises for this key type.
+//
+// The vendored golang.org/x/crypto in this tree predates ssh.MarshalPrivateKey
+// (added 2023), so the format is constructed manually. The shape mirrors the
+// parseOpenSSHPrivateKey structures in vendor/golang.org/x/crypto/ssh/keys.go:
+// outer = (CipherName, KdfName, KdfOpts, NumKeys, PubKey, PrivKeyBlock); inner
+// pk1 = (Check1, Check2, Keytype, {Pub, Priv, Comment, padding}).
+func marshalOpenSSHEd25519PrivateKey(priv ed25519.PrivateKey) ([]byte, error) {
+	pub := priv.Public().(ed25519.PublicKey)
+
+	var checkBytes [4]byte
+	if _, err := rand.Read(checkBytes[:]); err != nil {
+		return nil, err
+	}
+	check := binary.BigEndian.Uint32(checkBytes[:])
+
+	pubKeyPart := cryptossh.Marshal(struct {
+		KeyType string
+		Pub     []byte
+	}{
+		KeyType: cryptossh.KeyAlgoED25519,
+		Pub:     pub,
+	})
+
+	privInner := cryptossh.Marshal(struct {
+		Pub     []byte
+		Priv    []byte
+		Comment string
+	}{
+		Pub:     pub,
+		Priv:    priv,
+		Comment: "",
+	})
+
+	privBlock := cryptossh.Marshal(struct {
+		Check1  uint32
+		Check2  uint32
+		Keytype string
+		Rest    []byte `ssh:"rest"`
+	}{
+		Check1:  check,
+		Check2:  check,
+		Keytype: cryptossh.KeyAlgoED25519,
+		Rest:    privInner,
+	})
+	for i := 1; len(privBlock)%8 != 0; i++ {
+		privBlock = append(privBlock, byte(i))
+	}
+
+	outer := cryptossh.Marshal(struct {
+		CipherName   string
+		KdfName      string
+		KdfOpts      string
+		NumKeys      uint32
+		PubKey       []byte
+		PrivKeyBlock []byte
+	}{
+		CipherName:   "none",
+		KdfName:      "none",
+		KdfOpts:      "",
+		NumKeys:      1,
+		PubKey:       pubKeyPart,
+		PrivKeyBlock: privBlock,
+	})
+
+	body := append([]byte("openssh-key-v1\x00"), outer...)
+	return pem.EncodeToMemory(&pem.Block{
+		Type:  "OPENSSH PRIVATE KEY",
+		Bytes: body,
+	}), nil
 }
 
 func fileExists(path string) bool {
