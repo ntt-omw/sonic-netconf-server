@@ -339,7 +339,13 @@ func extractTransactionalRequestByOpTag2(node *xmlquery.Node, opTag string) ([]C
 			}
 
 			if len(innerContainerPayload) != 0 {
-				config.payload[modelContainer.Data+":"+innerContainer.Data] = innerContainerPayload
+				// translib at path /<module>:<container> already targets the
+				// outer container, so the payload is its BODY. Re-wrapping
+				// the body under "<module>:<inner>" produces an extra layer
+				// that translib's RFC 7951 unmarshaller rejects with:
+				//   parent container <container> (type ...): JSON contains
+				//   unexpected field <module>:<inner>
+				config.payload[innerContainer.Data] = innerContainerPayload
 			}
 		}
 
@@ -431,8 +437,12 @@ func extractTransactionalRequestByOpTag3(node *xmlquery.Node, opTag string) ([]C
 			}
 
 			if len(innerContainerPayload) != 0 {
-				config.payload[modelContainer.Data+":"+modelContainer.Data] = make(map[string]interface{})
-				config.payload[modelContainer.Data+":"+modelContainer.Data].(map[string]interface{})[innerContainer.Data] = innerContainerPayload
+				// Same translib path/payload contract as the OpTag2 case above:
+				// the previous double-wrap form
+				//   {"<module>:<container>": {"<inner>": ...}}
+				// trips translib with "JSON contains unexpected field
+				// <module>:<container>". Emit the inner container body directly.
+				config.payload[innerContainer.Data] = innerContainerPayload
 			}
 		}
 
@@ -535,7 +545,11 @@ func extractAtomicRequestsByOpTag2(node *xmlquery.Node, opTag string) ([]Config,
 					leafConfig.operation = opTag
 					leafConfig.path = leafPath
 					leafConfig.payload = make(map[string]interface{})
-					leafConfig.payload[modelContainer.Data+":"+leafTag] = leafText
+					// Path already targets the leaf node directly. Prefixing the
+					// JSON key with the module name re-wraps the value as if at a
+					// higher container and trips translib with "JSON contains
+					// unexpected field <module>:<leaf>".
+					leafConfig.payload[leafTag] = leafText
 					leafConfig.keys = len(keys)
 					configs = append(configs, leafConfig)
 				}
