@@ -196,10 +196,8 @@ func writeOkResponse(session ssh.Session, id string) {
 	writeResponse(session, CreateResponse(id, []byte("ok")))
 }
 
-func createErrorXML(err error) string {
-	return fmt.Sprintf("<rpc-error><error-type>rpc</error-type><error-severity>error</error-severity><error-message xml:lang=\"en\">%s</error-message></rpc-error>", err.Error())
-}
-
+// createErrorResponse wraps createErrorXML (rpcerror.go) into a full
+// <rpc-reply> with the supplied message-id.
 func createErrorResponse(messageId string, err error) string {
 	return CreateResponse(messageId, []byte(createErrorXML(err)))
 }

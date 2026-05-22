@@ -126,7 +126,12 @@ func GetRequestHandler(context ssh.Context, rootNode *xmlquery.Node, target DbTa
 		pathResult, err := innerGetHandler(rootNode, request, target)
 
 		if err != nil {
-			return "", errors.New("Failed to handle request")
+			// Surface the actual translib error to the client. The previous
+			// "Failed to handle request" placeholder hid the cause and made the
+			// resulting <rpc-error> useless for diagnosis. The error type is
+			// classified by handler.go's classifyError, which produces a
+			// standardised RFC 6241 §4.3 <error-tag>.
+			return "", err
 		}
 
 		resultStr += pathResult
